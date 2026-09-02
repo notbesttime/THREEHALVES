@@ -517,8 +517,8 @@ let tankMesh = null;                       // 身侧蓝色压力罐（弱点）�
 const chainsaw = new THREE.Group();
 let headGrp, eyeMatL, eyeLight, eyeGlows = [], sawLight, tankMat, tankGlow, sawTeeth;
 let robotPortraitSprite = null, robotPortraitMaterial = null;
-let robotPortraitTexture = null, robotPortraitName = '企鹅形象';
-let robotPortraitReady = false, robotPortraitId = '';
+let robotPortraitTexture = null, robotPortraitName = '原始建模';
+let robotPortraitReady = false, robotPortraitId = 'none';
 let robotBodyHidden = false;
 {
   /* 纯黑材质组：只靠粗糙度差异区分层次 */
@@ -795,6 +795,8 @@ let pry4Busy = false, pry4Done = false;                       // 撬门演出进
 let lvl4RoomHint = false;                                     // 405房间窗洞旁白已触发
 let robotStunT = 0, axeSwingT = 0, lastStepPh = 0;
 let acClimbMode=0, acClimbIndex=0, acJumpT=0, acMountT=0, glassBreakT=0, acJumpFromX=0, acJumpToX=0;
+let acEdgeWobble = { yaw: 0, pitch: 0 };   // 外机边缘镜头颤动（消逝的光芒式），每帧减旧加新防漂移
+let acEdgeHinted = false;                  // 本台外机“到边缘了”提示只出一次
 let acQte=0, acQteProgress=0, acQteT=0, acQteCamYaw=0;
 let acFloorY = null;                 // 外机交互CG接管垂直高度时非 null（floorYAt 直接返回它）
 let fallExt = null, prWinBack = null;     // 5F 坠楼外立面 / 503 窗外山火背景板（4F 时必须隐藏，否则糊死 405 窗）
@@ -3813,13 +3815,18 @@ bindTapButton('attackBtn', function () {
   if (itemInHand('pistol')) firePistol();
   else if (itemInHand('axe')) chopSwing();
 });
+/* 跳跃键：只在外机顶行走时出现，触发与空格同一条攀爬跳跃路径 */
+bindTapButton('jumpBtn', function () { if (!phoneViewOpen) acClimbJump(); });
 /* 手机奔跑只由摇杆拉到外圈触发；桌面端仍保留 Shift 键。 */
 /* 攻击键按需显示：手里有武器时才出现 */
 function refreshTouchButtons() {
   const ab = document.getElementById('attackBtn');
   const rb = document.getElementById('reloadBtn');
+  const jb = document.getElementById('jumpBtn');
   if (ab) ab.classList.toggle('hide', !(itemInHand('pistol') || itemInHand('axe') || itemInHand('tools')));
   if (rb) rb.classList.toggle('hide', !itemInHand('pistol'));
+  /* 跳跃键只在外机顶行走时出现（手机端没有空格键，攀爬跳跃全靠它） */
+  if (jb) jb.classList.toggle('hide', acClimbMode !== 1);
 }
 
 /* ==================== 机器人形象（当前页面会话） ==================== */
@@ -4002,7 +4009,9 @@ function portraitSetView(open) {
   portraitView.setAttribute('aria-hidden', String(!portraitOpen));
   if (portraitOpen) {
     portraitBuildGrid();
-    if (robotPortraitId === '') portraitLoadPreset(portraitPresets[0]);
+    if (robotPortraitId === 'none' && portraitPreview && !portraitPreview.getAttribute('src')) {
+      portraitPreview.src = portraitPlaceholderUrl();   // 默认原始建模：预览框先给占位卡
+    }
   }
   updateOrientationGate();
 }
@@ -4035,13 +4044,13 @@ if (portraitBackBtn) portraitBackBtn.addEventListener('click', function () {
   pauseMenu.classList.add('show');
 });
 if (portraitResetBtn) portraitResetBtn.addEventListener('click', function () {
-  portraitFile.value = ''; portraitLoadPreset(portraitPresets[0]);
+  portraitFile.value = ''; portraitClearToOriginal();   // 默认 = 原始建模
 });
 if (portraitFile) portraitFile.addEventListener('change', function () { portraitLoadFile(this.files && this.files[0]); });
   if (portraitView) portraitView.addEventListener('click', function (e) {
     if (e.target === portraitView) { portraitSetView(false); pauseMenu.classList.add('show'); }
   });
-  portraitLoadPreset(portraitPresets[0]);
+  /* 默认形象 = 原始建模；企鹅等形象只作为可选项，选中才加载 */
 
 inventorySlots.forEach(function (slot, i) {
   slot.addEventListener('click', function (e) { selectInventorySlot(i); e.stopPropagation(); });
@@ -4118,6 +4127,9 @@ const VIBEHUB_WORK = (function () {
 })();
 const ACH_CLOUD_KEY = 'achievements';  // vibe.save 里的键名
 const ACH_SCHEMA_V = 2;
+/* 成就解锁状态必须有顶层声明：achUnlock 在任何路线都可能被调用
+   （含跳过 begin() 的调试路线），不能依赖 achLocalLoad 隐式创建全局 */
+let achUnlocked = {};
 
 let vibeInst = null;                  // VibeHub.init() 的返回，可能为 null
 let vibeUser = null;                  // vibe.login() 返回的 {id, name, image}
@@ -6200,7 +6212,8 @@ function spawnWindowShards4() {
 }
 function beginAcClimb() {
   if (state!=='play' || curLevel!==-1 || !acWindowBroken || acClimbMode) return;
-  acClimbMode=1; acClimbIndex=0; acJumpT=0; acMountT=1.1; playerPos.x=4.9; playerPos.z=-2.15; playerFloorY=-2.90; clearMoveInput(); promptEl.classList.remove('show'); say('攀爬到空调外机上，小心脚下。',2600);
+  acClimbMode=1; acClimbIndex=0; acJumpT=0; acMountT=1.1; acEdgeHinted=false; playerPos.x=4.9; playerPos.z=-2.15; playerFloorY=-2.90; clearMoveInput(); promptEl.classList.remove('show'); say('攀上外机——走到边缘，靠近下一台时再跳。',2800);
+  refreshTouchButtons();
   /* 上外机就有微弱的直升机声——救援在来的路上（后续挂在外机等救援） */
   if (AC && heliTimer < 0) startHeliSound();
   if (heliGain && AC) heliGain.gain.setTargetAtTime(0.085, AC.currentTime, 2.5);
@@ -6219,7 +6232,24 @@ function updateAcClimb(dt) {
     if(acJumpT<=0){ playerFloorY=-2.90; lookPitch=-0.03; acClimbIndex++; if(acClimbIndex>=3){ beginAcQte(); } }
     return true;
   }
-  const dir=(moveKeys.right?1:0)-(moveKeys.left?1:0); if(dir){playerPos.x+=dir*dt*0.72; playerPos.x=clamp(playerPos.x,xs[acClimbIndex]-0.54,xs[acClimbIndex]+0.54);} playerPos.z=-3.05; return true;
+  /* 外机顶行走：输入与正常行走一致（键盘 A/D + 摇杆横轴），速度同为正常行走的 1.65。
+     clamp 就是“空气墙”——在外机任何位置都掉不下去；靠近边缘另有镜头颤动表现。 */
+  lookYaw -= acEdgeWobble.yaw; lookPitch -= acEdgeWobble.pitch;
+  acEdgeWobble.yaw = 0; acEdgeWobble.pitch = 0;
+  const dir = clamp((moveKeys.right ? 1 : 0) - (moveKeys.left ? 1 : 0) + moveAxisX, -1, 1);
+  if (dir) playerPos.x = clamp(playerPos.x + dir * dt * 1.65, xs[acClimbIndex] - 0.54, xs[acClimbIndex] + 0.54);
+  playerPos.z = -3.05;
+  /* 消逝的光芒式边缘：距中心 ≥0.30 即边缘区（两侧都算），越靠边颤得越明显；
+     面向下一台外机（-X 侧）的边缘才允许起跳（判定在 acClimbJump）。 */
+  const off = playerPos.x - xs[acClimbIndex];
+  if (Math.abs(off) >= 0.30) {
+    const k = (Math.min(1, (Math.abs(off) - 0.30) / 0.24) * 0.5 + 0.5);
+    acEdgeWobble.yaw = Math.sin(elapsed * 13) * 0.0035 * k;
+    acEdgeWobble.pitch = Math.sin(elapsed * 21) * 0.0022 * k - 0.028 * k;
+    lookYaw += acEdgeWobble.yaw; lookPitch += acEdgeWobble.pitch;
+    if (off <= -0.30 && !acEdgeHinted) { acEdgeHinted = true; say('到边缘了……看准时机就跳。', 2000); }
+  }
+  return true;
 }
 if(!document.getElementById('acQteStyle')){ const st=document.createElement('style'); st.id='acQteStyle'; st.textContent='@keyframes acPulse{to{transform:scale(1.12);background:#c96a1e}}'; document.head.appendChild(st);}
 function ensureAcQteSaw(){
@@ -6279,6 +6309,7 @@ function resetAcRescueProps(){
 }
 function beginAcQte(){
   acQte=1; acQteProgress=0; acQteT=0; acQteCamYaw=lookYaw; acClimbMode=3;
+  refreshTouchButtons();   // 进入 QTE：acClimbMode 已非 1，外机跳跃键同步隐藏
   clearMoveInput(); promptEl.classList.remove('show'); document.body.classList.add('cg');
   acFloorY=-2.90;                                   // 从这里开始垂直高度由 CG 接管
   for(let ui=0;ui<acUnitMeshes.length;ui++) acUnitMeshes[ui].matrixAutoUpdate=true;
@@ -6472,7 +6503,11 @@ function updateAcQte(dt){
     /* 分镜结束后一直挂在钩点下摇摆——等玩家登上救援梯 */
   }
 }
-function acClimbJump(){ if(acClimbMode!==1||acMountT>0||acJumpT>0||acClimbIndex>=3)return; const xs=[4.9,1.7,-1.5,-4.7,-7.0]; if(Math.abs(playerPos.x-xs[acClimbIndex])<0.62){acJumpFromX=playerPos.x;acJumpToX=xs[acClimbIndex+1];acJumpT=0.82;clearMoveInput();SFX.step(false);} }
+function acClimbJump(){ if(acClimbMode!==1||acMountT>0||acJumpT>0||acClimbIndex>=3)return; const xs=[4.9,1.7,-1.5,-4.7,-7.0];
+  /* 只有站在“面向下一台外机”的边缘（-X 侧边缘区）才允许起跳——中间跳不过去，弹跳力才合理 */
+  if(playerPos.x - xs[acClimbIndex] > -0.30){ say('得先挪到外机边缘再跳。',1800); return; }
+  lookYaw-=acEdgeWobble.yaw; lookPitch-=acEdgeWobble.pitch; acEdgeWobble.yaw=acEdgeWobble.pitch=0;
+  acJumpFromX=playerPos.x;acJumpToX=xs[acClimbIndex+1];acJumpT=0.82;clearMoveInput();SFX.step(false); }
 function beginFallEnding(line, name, from, sayText) {
   if (state === 'fall') return;
   fallEndingLine = line || '结局 1'; fallEndingName = name || '猎魔人的信仰之跃';
@@ -7005,6 +7040,8 @@ function switchLevel(n) {
 function onLevelEnter(n) {
   if (n === -1) {
     acClimbMode = 0; acClimbIndex = 0; acJumpT = 0; acMountT = 0; glassBreakT = 0; acQte=0; acQteProgress=0; acWindowBroken = false;
+    acEdgeHinted = false; acEdgeWobble.yaw = 0; acEdgeWobble.pitch = 0;
+    refreshTouchButtons();   // 离开外机路线时同步隐藏跳跃键
     acFloorY = null; acFallVy = 0; hideAcQteDom(); clearAcQteSaw();
     if(acSickleHook){ if(acSickleHook.parent) acSickleHook.parent.remove(acSickleHook); acSickleHook=null; }
     if(SFX.isChainsawOn){ SFX.stopChainsaw(); SFX.isChainsawOn=false; }
@@ -7724,6 +7761,8 @@ function applyPlayerCam(k) {   // k: 0 躺, 1 坐起
 function enterPlayerRoom() {
   // 每次重新开始都恢复四楼玻璃/攀爬路线，避免上次调试状态残留导致直接攀爬
   case4Read = false; case4GlassBroken = false; case4FadeAt = 0; acWindowBroken = false; acClimbMode = 0; acClimbIndex = 0; acJumpT = 0; acMountT = 0; glassBreakT = 0;
+  acEdgeHinted = false; acEdgeWobble.yaw = 0; acEdgeWobble.pitch = 0;
+  refreshTouchButtons();
   acQte = 0; acFloorY = null; acFallVy = 0; hideAcQteDom(); clearAcQteSaw();
   resetAcRescueProps();
   stopGarageRobot();
@@ -9340,13 +9379,27 @@ addEventListener('orientationchange', resetOrientationGateAfterResize);
    250ms 轮询只读方向/状态，参考 cs1.6 的实现，避免竖屏漏掉阻断提示。 */
 setInterval(updateOrientationGate, 250);
 updateOrientationGate();
-/* 调试句柄：?dbg=1 时暴露机器人/形象状态，供外部验证与截图排查 */
+/* 调试句柄：?dbg=1 时暴露机器人/形象/攀爬状态，供外部验证与截图排查 */
 if (DBG) {
   window.__TH_DEBUG = {
     get robot() { return robot; },
     get portrait() { return robotPortraitSprite; },
     get portraitReady() { return robotPortraitReady; },
-    get state() { return state; }
+    get state() { return state; },
+    /* 攀爬段验证桥接：闭包变量外部直读不到，全部经这里中转 */
+    get climbMode() { return acClimbMode; },
+    set climbMode(v) { acClimbMode = v; },
+    get climbIndex() { return acClimbIndex; },
+    set climbIndex(v) { acClimbIndex = v; },
+    get playerX() { return playerPos.x; },
+    set playerX(v) { playerPos.x = v; },
+    get mountT() { return acMountT; },
+    set mountT(v) { acMountT = v; },
+    get jumpT() { return acJumpT; },
+    set jumpT(v) { acJumpT = v; },
+    get edgeWobble() { return { yaw: acEdgeWobble.yaw, pitch: acEdgeWobble.pitch }; },
+    refreshTouchButtons: function () { refreshTouchButtons(); },
+    climbJump: function () { acClimbJump(); }
   };
 }
 animate();

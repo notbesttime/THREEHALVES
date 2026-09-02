@@ -428,6 +428,11 @@ body.ending #oxygen,
     border-color:rgba(255,150,120,.6); background:rgba(60,14,8,.3); }
   #attackBtn span { font-size:11px; letter-spacing:1px; top:29px; }
   #attackBtn.hide { display:none; }
+  /* 跳跃键：只在四楼外机顶行走时出现（refreshTouchButtons 控制） */
+  #jumpBtn { right:104px; bottom:158px; width:56px; height:56px;
+    border-color:rgba(255,200,120,.55); background:rgba(46,24,8,.3); }
+  #jumpBtn span { font-size:12px; letter-spacing:1px; top:19px; }
+  #jumpBtn.hide { display:none; }
   #lookHint { position:absolute; right:22px; bottom:236px; color:rgba(255,255,255,.42);
     font-size:10px; letter-spacing:2px; text-shadow:0 1px 4px #000; }
   /* 触屏上所有触控件都不该唤起系统菜单、双击缩放或长按选中 */
@@ -740,6 +745,7 @@ body.ending #oxygen,
   <button id="menuBtn" class="touchBtn" aria-label="设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.24.6.8 1 1.44 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.03z"/></svg></button>
   <button id="crouchBtn" class="touchBtn" aria-label="蹲下"><svg viewBox="0 0 24 24"><circle cx="16" cy="5" r="2"/><path d="m14 8-3 4 3 2 3 5M11 12 7 9m7 5-5 5m5-5h5"/></svg></button>
   <button id="attackBtn" class="touchBtn hide" aria-label="攻击"><span>攻击</span></button>
+  <button id="jumpBtn" class="touchBtn hide" aria-label="跳跃"><span>跳</span></button>
   <div id="actPad">
     <button id="pickBtn" class="touchBtn" aria-label="拾取"><span>F</span><b>拾取</b></button>
     <button id="useBtn" class="touchBtn" aria-label="交互"><span>E</span><b>交互</b></button>
@@ -764,7 +770,7 @@ body.ending #oxygen,
       <img id="portraitPreview" alt="当前机器人形象">
       <div class="portraitCurrentText">
         <div class="portraitCurrentLabel">当前选择</div>
-        <div id="portraitCurrentName">企鹅形象</div>
+        <div id="portraitCurrentName">原始建模</div>
       </div>
     </div>
     <div class="portraitGrid" id="portraitGrid"></div>
@@ -881,7 +887,7 @@ body.ending #oxygen,
   function boot(){
     if(!window.THREE){ return fatal('three.js 已下载但未挂载'); }
     if(!hasError) msg.textContent = '正在构建场景…';
-    load('opening.js?v=20260831_6', function(){ if(!hasError) msg.style.display='none'; },
+    load('opening.js?v=20260831_9', function(){ if(!hasError) msg.style.display='none'; },
          function(){ fatal('opening.js 未找到'); });
   }
   /* 音频与形象 bundle 必须在 opening.js 前按顺序完成；它们体积较大，
