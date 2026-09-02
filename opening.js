@@ -3413,7 +3413,7 @@ const roofColliders = [
   { x0: -6.15, x1: -5.85, z0: 1.75, z1: 2.05 },    // 立管
   { x0: 3.25, x1: 3.55, z0: 1.75, z1: 2.05 }
 ];
-let lookYaw = 0, lookPitch = 0, pointerLocked = false, lookActive = false, menuOpen = false;
+let lookYaw = 0, lookPitch = 0, pointerLocked = false, pointerLockFailed = false, lookActive = false, menuOpen = false;
 let portraitOpen = false;
 let crouchHeld = false, crouchAmount = 0, selectedSlot = 0, walkPhase = 0, walkAmount = 0;
 let lookTouchId = null, lookTouchX = 0, lookTouchY = 0;
@@ -3504,16 +3504,39 @@ function selectInventorySlot(index) {
 }
 function requestLookLock() {
   if (state !== 'play' || menuOpen) return;
-  lookActive = true;
-  const coarse = isTouchMode();
-  if (!coarse && document.pointerLockElement !== canvas && canvas.requestPointerLock) {
-    /* 新版 Chrome 里 requestPointerLock 返回 Promise。
-       如果玩家在请求完成前又松开了锁，它会 reject（"user has exited the lock..."），
-       那是无害的竞态，必须自己吞掉，否则会冒到 unhandledrejection 弹红条。 */
-    try {
-      const pr = canvas.requestPointerLock();
-      if (pr && typeof pr.catch === 'function') pr.catch(function () {});
-    } catch (e) { /* 老浏览器返回 undefined，忽略 */ }
+  if (isTouchMode()) { lookActive = true; return; }
+  if (document.pointerLockElement === canvas) {
+    pointerLocked = true; lookActive = true; pointerLockFailed = false;
+    return;
+  }
+
+  /* 桌面端只有真实 Pointer Lock 才能提供不受屏幕边缘限制的相对位移。
+     requestPointerLock 失败时不能退回到“隐藏光标 + 普通 mousemove”：那种输入仍会
+     被屏幕边缘截断，正是视角转到一半后停住的原因。 */
+  lookActive = false;
+  pointerLockFailed = false;
+  updateMouseLockHint();
+  if (!canvas.requestPointerLock) {
+    pointerLockFailed = true;
+    updateMouseLockHint();
+    return;
+  }
+  try {
+    const pr = canvas.requestPointerLock();
+    if (pr && typeof pr.catch === 'function') {
+      pr.catch(function () {
+        /* 自动重锁没有用户激活时会被正常拒绝；只要随后点击画面即可重试。 */
+        if (document.pointerLockElement !== canvas) {
+          pointerLockFailed = true;
+          lookActive = false;
+          updateMouseLockHint();
+        }
+      });
+    }
+  } catch (e) {
+    pointerLockFailed = true;
+    lookActive = false;
+    updateMouseLockHint();
   }
 }
 let lockGraceUntil = 0;      // 程序主动解锁后的冷却：这段时间内的 pointerlockchange 不算"玩家想暂停"
@@ -3619,6 +3642,9 @@ function updateBarricade(dt) {
 }
 document.addEventListener('pointerlockchange', function () {  const wasLocked = pointerLocked;
   pointerLocked = document.pointerLockElement === canvas;
+  document.body.classList.toggle('pointer-locked', pointerLocked);
+  if (!isTouchMode()) lookActive = pointerLocked;
+  if (pointerLocked) pointerLockFailed = false;
   /* 看手机时是主动放开鼠标（要点消息），不是玩家想暂停——别弹设置菜单。
      暂停菜单只由 ESC 控制。 */
   /* 只有"玩家自己按 Esc 松开鼠标"才弹暂停菜单。
@@ -3628,11 +3654,19 @@ document.addEventListener('pointerlockchange', function () {  const wasLocked = 
       Date.now() > lockGraceUntil) setPauseMenu(true);
   updateMouseLockHint();
 });
+document.addEventListener('pointerlockerror', function () {
+  pointerLocked = false;
+  if (!isTouchMode()) lookActive = false;
+  document.body.classList.remove('pointer-locked');
+  pointerLockFailed = true;
+  updateMouseLockHint();
+});
 /* 实战中鼠标未被锁定时给出明显提示。
    CG / 开场期间游戏会主动 exitPointerLock，回到实战后如果没锁回鼠标，
    视角就完全失灵、鼠标移出窗口即"离开游戏"——这里给出可见的一键恢复路径。 */
 function updateMouseLockHint() {
   if (!lockHintEl) return;
+  lockHintEl.textContent = pointerLockFailed ? '鼠标锁定失败 · 点击画面重试' : '点击画面 · 锁定鼠标';
   const show = !isTouchMode() && state === 'play' && !menuOpen && !phoneViewOpen &&
     !choiceOpen && !acQte && !document.pointerLockElement;
   lockHintEl.classList.toggle('show', show);
@@ -3656,6 +3690,7 @@ document.addEventListener('mousemove', function (e) {
   if (state !== 'play' || menuOpen || phoneViewOpen) return;
   /* CG 抉择期间：鼠标滑动控制视角偏向，只做预览高亮，不自动选择（必须点击确认）*/
   if (choiceOpen) {
+    if (document.pointerLockElement !== canvas) return;
     choiceLookAccum += e.movementX * 0.003;
     choiceLookAccum = clamp(choiceLookAccum, -0.6, 0.6);
     choiceHover = choiceLookAccum < -0.1 ? -1 : choiceLookAccum > 0.1 ? 1 : 0;
@@ -3664,7 +3699,7 @@ document.addEventListener('mousemove', function (e) {
     else { scEl.classList.remove('hl-left', 'hl-right'); }
     return;
   }
-  if (!pointerLocked && !lookActive) return;
+  if (document.pointerLockElement !== canvas) return;
   /* 鼠标控制视角 —— 标准 FPS 方向：鼠标往右滑=视角往右转 */
   const s = _lookSens();
   lookYaw -= e.movementX * s;
