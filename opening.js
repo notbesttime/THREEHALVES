@@ -3414,6 +3414,8 @@ const roofColliders = [
   { x0: 3.25, x1: 3.55, z0: 1.75, z1: 2.05 }
 ];
 let lookYaw = 0, lookPitch = 0, pointerLocked = false, pointerLockFailed = false, lookActive = false, menuOpen = false;
+let pointerLockFailureMessage = '';
+let pointerLockAcquiredAt = -Infinity;
 let portraitOpen = false;
 let crouchHeld = false, crouchAmount = 0, selectedSlot = 0, walkPhase = 0, walkAmount = 0;
 let lookTouchId = null, lookTouchX = 0, lookTouchY = 0;
@@ -3502,11 +3504,28 @@ function selectInventorySlot(index) {
     refreshInventoryHUD();
   }
 }
+function pointerLockFailureText(error) {
+  const name = error && error.name ? error.name : '';
+  if (name === 'SecurityError') return '当前预览容器禁止鼠标锁定 · 请直接打开游戏链接';
+  if (name === 'WrongDocumentError') return '游戏窗口未聚焦 · 再点击一次画面';
+  if (name === 'NotSupportedError') return '当前浏览器不支持鼠标锁定';
+  if (name === 'NotAllowedError') return '请直接点击游戏画面以锁定鼠标';
+  return name ? '鼠标锁定失败（' + name + '）· 点击画面重试' : '鼠标锁定失败 · 点击画面重试';
+}
+function reportPointerLockFailure(error, quiet) {
+  pointerLockFailed = true;
+  pointerLockFailureMessage = pointerLockFailureText(error);
+  lookActive = false;
+  if (!quiet && typeof console !== 'undefined' && console.warn) {
+    console.warn('[THREEHALVES] Pointer Lock failed:', error || 'unknown error');
+  }
+  updateMouseLockHint();
+}
 function requestLookLock() {
   if (state !== 'play' || menuOpen) return;
   if (isTouchMode()) { lookActive = true; return; }
   if (document.pointerLockElement === canvas) {
-    pointerLocked = true; lookActive = true; pointerLockFailed = false;
+    pointerLocked = true; lookActive = true; pointerLockFailed = false; pointerLockFailureMessage = '';
     return;
   }
 
@@ -3515,28 +3534,25 @@ function requestLookLock() {
      被屏幕边缘截断，正是视角转到一半后停住的原因。 */
   lookActive = false;
   pointerLockFailed = false;
+  pointerLockFailureMessage = '';
   updateMouseLockHint();
   if (!canvas.requestPointerLock) {
-    pointerLockFailed = true;
-    updateMouseLockHint();
+    reportPointerLockFailure({ name: 'NotSupportedError', message: 'requestPointerLock is unavailable' });
     return;
   }
   try {
+    const hadUserActivation = !navigator.userActivation || navigator.userActivation.isActive;
     const pr = canvas.requestPointerLock();
     if (pr && typeof pr.catch === 'function') {
-      pr.catch(function () {
+      pr.catch(function (error) {
         /* 自动重锁没有用户激活时会被正常拒绝；只要随后点击画面即可重试。 */
         if (document.pointerLockElement !== canvas) {
-          pointerLockFailed = true;
-          lookActive = false;
-          updateMouseLockHint();
+          reportPointerLockFailure(error, error && error.name === 'NotAllowedError' && !hadUserActivation);
         }
       });
     }
   } catch (e) {
-    pointerLockFailed = true;
-    lookActive = false;
-    updateMouseLockHint();
+    reportPointerLockFailure(e);
   }
 }
 let lockGraceUntil = 0;      // 程序主动解锁后的冷却：这段时间内的 pointerlockchange 不算"玩家想暂停"
@@ -3644,7 +3660,11 @@ document.addEventListener('pointerlockchange', function () {  const wasLocked = 
   pointerLocked = document.pointerLockElement === canvas;
   document.body.classList.toggle('pointer-locked', pointerLocked);
   if (!isTouchMode()) lookActive = pointerLocked;
-  if (pointerLocked) pointerLockFailed = false;
+  if (pointerLocked) {
+    pointerLockFailed = false;
+    pointerLockFailureMessage = '';
+    pointerLockAcquiredAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  }
   /* 看手机时是主动放开鼠标（要点消息），不是玩家想暂停——别弹设置菜单。
      暂停菜单只由 ESC 控制。 */
   /* 只有"玩家自己按 Esc 松开鼠标"才弹暂停菜单。
@@ -3659,6 +3679,7 @@ document.addEventListener('pointerlockerror', function () {
   if (!isTouchMode()) lookActive = false;
   document.body.classList.remove('pointer-locked');
   pointerLockFailed = true;
+  if (!pointerLockFailureMessage) pointerLockFailureMessage = pointerLockFailureText();
   updateMouseLockHint();
 });
 /* 实战中鼠标未被锁定时给出明显提示。
@@ -3666,7 +3687,7 @@ document.addEventListener('pointerlockerror', function () {
    视角就完全失灵、鼠标移出窗口即"离开游戏"——这里给出可见的一键恢复路径。 */
 function updateMouseLockHint() {
   if (!lockHintEl) return;
-  lockHintEl.textContent = pointerLockFailed ? '鼠标锁定失败 · 点击画面重试' : '点击画面 · 锁定鼠标';
+  lockHintEl.textContent = pointerLockFailed ? pointerLockFailureMessage : '点击画面 · 锁定鼠标';
   const show = !isTouchMode() && state === 'play' && !menuOpen && !phoneViewOpen &&
     !choiceOpen && !acQte && !document.pointerLockElement;
   lockHintEl.classList.toggle('show', show);
@@ -3686,11 +3707,41 @@ canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 const mouseSens = 0.0026;              // 视角灵敏度（可在代码里改这个值，或 window.mouseSens = x 动态调整）
 if (!window.mouseSens) window.mouseSens = mouseSens;
 function _lookSens() { return (window.mouseSens != null) ? window.mouseSens : mouseSens; }
+function wrapLookYaw(yaw) {
+  const turn = Math.PI * 2;
+  yaw = (yaw + Math.PI) % turn;
+  if (yaw < 0) yaw += turn;
+  return yaw - Math.PI;
+}
+function safeLockedMouseDelta(dx, dy) {
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
+
+  /* 少数浏览器 / WebView 在进入 Pointer Lock 时会把锁定前后的绝对坐标差误报成
+     第一个 movementX/Y，表现为点击后视角瞬间跳走。规范要求输入中断后的首个增量为 0，
+     这里仍做兼容防御；正常连续移动不做平滑，避免人为引入拖尾和漂移。 */
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  if (now - pointerLockAcquiredAt < 100 && (Math.abs(dx) > 64 || Math.abs(dy) > 64)) return false;
+
+  /* 单事件超过半个视口通常是失焦/跨 iframe 切换产生的坏样本，而不是有效甩枪。 */
+  const maxDelta = Math.max(240, Math.max(innerWidth, innerHeight) * 0.5);
+  if (Math.abs(dx) > maxDelta || Math.abs(dy) > maxDelta) return false;
+
+  return true;
+}
+function applyLockedMouseLook(dx, dy) {
+  if (!safeLockedMouseDelta(dx, dy)) return false;
+
+  const s = _lookSens();
+  lookYaw = wrapLookYaw(lookYaw - dx * s);
+  lookPitch = clamp(lookPitch - dy * s * 0.81, -1.02, 0.66);
+  return true;
+}
 document.addEventListener('mousemove', function (e) {
   if (state !== 'play' || menuOpen || phoneViewOpen) return;
+  if (document.pointerLockElement !== canvas) return;
   /* CG 抉择期间：鼠标滑动控制视角偏向，只做预览高亮，不自动选择（必须点击确认）*/
   if (choiceOpen) {
-    if (document.pointerLockElement !== canvas) return;
+    if (!safeLockedMouseDelta(e.movementX, e.movementY)) return;
     choiceLookAccum += e.movementX * 0.003;
     choiceLookAccum = clamp(choiceLookAccum, -0.6, 0.6);
     choiceHover = choiceLookAccum < -0.1 ? -1 : choiceLookAccum > 0.1 ? 1 : 0;
@@ -3699,11 +3750,8 @@ document.addEventListener('mousemove', function (e) {
     else { scEl.classList.remove('hl-left', 'hl-right'); }
     return;
   }
-  if (document.pointerLockElement !== canvas) return;
   /* 鼠标控制视角 —— 标准 FPS 方向：鼠标往右滑=视角往右转 */
-  const s = _lookSens();
-  lookYaw -= e.movementX * s;
-  lookPitch = clamp(lookPitch - e.movementY * s * 0.81, -1.02, 0.66);
+  applyLockedMouseLook(e.movementX, e.movementY);
 });
 canvas.addEventListener('pointerdown', function (e) {
   if (e.pointerType !== 'touch' || state !== 'play' || menuOpen || phoneViewOpen) return;
@@ -3718,7 +3766,7 @@ canvas.addEventListener('pointerdown', function (e) {
 });
 canvas.addEventListener('pointermove', function (e) {
   if (e.pointerId !== lookTouchId || state !== 'play' || menuOpen || phoneViewOpen) return;
-  lookYaw -= (e.clientX - lookTouchX) * 0.0062;
+  lookYaw = wrapLookYaw(lookYaw - (e.clientX - lookTouchX) * 0.0062);
   lookPitch = clamp(lookPitch - (e.clientY - lookTouchY) * 0.0052, -1.02, 0.66);
   lookTouchX = e.clientX; lookTouchY = e.clientY;
   e.preventDefault();
@@ -6446,9 +6494,8 @@ function updateAcQte(dt){
     } else if(!lookActive){
       lookActive = true; requestLookLock();   // 可以转头看墙、看森林、看下面的火场
     }
-    /* 挂在外机下的左右摇摆颤动：叠在视线分镜上 */
-    lookYaw += Math.sin(acQteT*6.3)*0.014;
-    lookPitch += Math.sin(acQteT*5.1)*0.01;
+    /* 挂在外机下的左右摇摆颤动由 applyPlayerCam 作为显示偏移叠加，
+       不能逐帧写回 lookYaw/lookPitch，否则振幅会随帧率变化并污染玩家视角。 */
     if(acQteT>1.15 && acQteT-dt<=1.15) say('（钩住了——抓紧！！）', 1800);
     if(acQteT>2.35 && acQteT-dt<=2.35) say('（下面……砸下去了。）', 2000);
     /* 探照灯锁定后放下救援梯：按 E 登上 → 天台撤离 CG（结局 6 · 这次不行） */
@@ -7571,7 +7618,6 @@ function updateStairChoice() {
   lookYaw += dYaw * 0.08;
   /* 悬停/预选那一侧时，画面轻微朝那边偏一点（像在朝那个方向瞟）*/
   choiceLean += (choiceHover * 0.13 - choiceLean) * 0.12;
-  lookYaw += choiceLean * 0.1;
   lookPitch += (-0.02 - lookPitch) * 0.06;
   clearMoveInput();
 }
@@ -7676,6 +7722,12 @@ function applyPlayerCam(k) {   // k: 0 躺, 1 坐起
   if (k >= 1) {
     yaw += lookYaw;
     pitch += lookPitch;
+    /* 剧情镜头效果只叠加到本帧相机，绝不累加进玩家的永久视角状态。 */
+    if (state === 'play' && choiceOpen) yaw += choiceLean;
+    if (state === 'play' && acQte === 4) {
+      yaw += Math.sin(acQteT * 6.3) * 0.014;
+      pitch += Math.sin(acQteT * 5.1) * 0.01;
+    }
   }
   /* 死亡演出（death/dead）也要留在玩家当前位置——之前只判断 'play'，
      一死相机就弹回床上，所以既不对着机器人、看着还像卡住了 */
@@ -9346,7 +9398,8 @@ if (DBG) {
     get robot() { return robot; },
     get portrait() { return robotPortraitSprite; },
     get portraitReady() { return robotPortraitReady; },
-    get state() { return state; }
+    get state() { return state; },
+    get look() { return { yaw: lookYaw, pitch: lookPitch, cameraYaw: cam.rotation.y, cameraPitch: cam.rotation.x }; }
   };
 }
 animate();
