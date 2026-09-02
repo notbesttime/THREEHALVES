@@ -3414,6 +3414,7 @@ const roofColliders = [
   { x0: 3.25, x1: 3.55, z0: 1.75, z1: 2.05 }
 ];
 let lookYaw = 0, lookPitch = 0, pointerLocked = false, pointerLockFailed = false, lookActive = false, menuOpen = false;
+let pointerLockFailureMessage = '';
 let portraitOpen = false;
 let crouchHeld = false, crouchAmount = 0, selectedSlot = 0, walkPhase = 0, walkAmount = 0;
 let lookTouchId = null, lookTouchX = 0, lookTouchY = 0;
@@ -3502,11 +3503,28 @@ function selectInventorySlot(index) {
     refreshInventoryHUD();
   }
 }
+function pointerLockFailureText(error) {
+  const name = error && error.name ? error.name : '';
+  if (name === 'SecurityError') return '当前预览容器禁止鼠标锁定 · 请直接打开游戏链接';
+  if (name === 'WrongDocumentError') return '游戏窗口未聚焦 · 再点击一次画面';
+  if (name === 'NotSupportedError') return '当前浏览器不支持鼠标锁定';
+  if (name === 'NotAllowedError') return '请直接点击游戏画面以锁定鼠标';
+  return name ? '鼠标锁定失败（' + name + '）· 点击画面重试' : '鼠标锁定失败 · 点击画面重试';
+}
+function reportPointerLockFailure(error, quiet) {
+  pointerLockFailed = true;
+  pointerLockFailureMessage = pointerLockFailureText(error);
+  lookActive = false;
+  if (!quiet && typeof console !== 'undefined' && console.warn) {
+    console.warn('[THREEHALVES] Pointer Lock failed:', error || 'unknown error');
+  }
+  updateMouseLockHint();
+}
 function requestLookLock() {
   if (state !== 'play' || menuOpen) return;
   if (isTouchMode()) { lookActive = true; return; }
   if (document.pointerLockElement === canvas) {
-    pointerLocked = true; lookActive = true; pointerLockFailed = false;
+    pointerLocked = true; lookActive = true; pointerLockFailed = false; pointerLockFailureMessage = '';
     return;
   }
 
@@ -3515,28 +3533,25 @@ function requestLookLock() {
      被屏幕边缘截断，正是视角转到一半后停住的原因。 */
   lookActive = false;
   pointerLockFailed = false;
+  pointerLockFailureMessage = '';
   updateMouseLockHint();
   if (!canvas.requestPointerLock) {
-    pointerLockFailed = true;
-    updateMouseLockHint();
+    reportPointerLockFailure({ name: 'NotSupportedError', message: 'requestPointerLock is unavailable' });
     return;
   }
   try {
+    const hadUserActivation = !navigator.userActivation || navigator.userActivation.isActive;
     const pr = canvas.requestPointerLock();
     if (pr && typeof pr.catch === 'function') {
-      pr.catch(function () {
+      pr.catch(function (error) {
         /* 自动重锁没有用户激活时会被正常拒绝；只要随后点击画面即可重试。 */
         if (document.pointerLockElement !== canvas) {
-          pointerLockFailed = true;
-          lookActive = false;
-          updateMouseLockHint();
+          reportPointerLockFailure(error, error && error.name === 'NotAllowedError' && !hadUserActivation);
         }
       });
     }
   } catch (e) {
-    pointerLockFailed = true;
-    lookActive = false;
-    updateMouseLockHint();
+    reportPointerLockFailure(e);
   }
 }
 let lockGraceUntil = 0;      // 程序主动解锁后的冷却：这段时间内的 pointerlockchange 不算"玩家想暂停"
@@ -3644,7 +3659,7 @@ document.addEventListener('pointerlockchange', function () {  const wasLocked = 
   pointerLocked = document.pointerLockElement === canvas;
   document.body.classList.toggle('pointer-locked', pointerLocked);
   if (!isTouchMode()) lookActive = pointerLocked;
-  if (pointerLocked) pointerLockFailed = false;
+  if (pointerLocked) { pointerLockFailed = false; pointerLockFailureMessage = ''; }
   /* 看手机时是主动放开鼠标（要点消息），不是玩家想暂停——别弹设置菜单。
      暂停菜单只由 ESC 控制。 */
   /* 只有"玩家自己按 Esc 松开鼠标"才弹暂停菜单。
@@ -3659,6 +3674,7 @@ document.addEventListener('pointerlockerror', function () {
   if (!isTouchMode()) lookActive = false;
   document.body.classList.remove('pointer-locked');
   pointerLockFailed = true;
+  if (!pointerLockFailureMessage) pointerLockFailureMessage = pointerLockFailureText();
   updateMouseLockHint();
 });
 /* 实战中鼠标未被锁定时给出明显提示。
@@ -3666,7 +3682,7 @@ document.addEventListener('pointerlockerror', function () {
    视角就完全失灵、鼠标移出窗口即"离开游戏"——这里给出可见的一键恢复路径。 */
 function updateMouseLockHint() {
   if (!lockHintEl) return;
-  lockHintEl.textContent = pointerLockFailed ? '鼠标锁定失败 · 点击画面重试' : '点击画面 · 锁定鼠标';
+  lockHintEl.textContent = pointerLockFailed ? pointerLockFailureMessage : '点击画面 · 锁定鼠标';
   const show = !isTouchMode() && state === 'play' && !menuOpen && !phoneViewOpen &&
     !choiceOpen && !acQte && !document.pointerLockElement;
   lockHintEl.classList.toggle('show', show);
