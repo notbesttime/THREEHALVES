@@ -542,7 +542,9 @@ body.ending #oxygen,
     .portraitUpload { align-items:stretch; flex-direction:column; }
     .portraitUpload label { width:100%; }
   }
-  body.playing { cursor:none; }
+  /* Pointer Lock 自己会隐藏光标。只在浏览器确认锁定成功后同步这个状态，
+     避免请求被拒绝时仅靠 CSS 藏住光标，让普通鼠标在屏幕边缘停住。 */
+  body.playing.pointer-locked { cursor:none; }
   body.playing #pauseMenu, body.playing #pauseMenu *,
   body.playing #achView, body.playing #achView *,
   body.playing #portraitView, body.playing #portraitView *,
@@ -683,7 +685,7 @@ body.ending #oxygen,
 <div id="blackout"></div>
 <div id="eyelids"><div class="lid up"></div><div class="lid down"></div></div>
 <div id="cont">点击继续</div>
-<div id="lockHint">点击画面 · 锁定鼠标</div>
+<div id="lockHint" role="status" aria-live="polite">点击画面 · 锁定鼠标</div>
 <div id="hud">WASD · 移动　Shift · 奔跑　C · 蹲下<br>F · 拾取　E · 交互　Q · 丢弃　V · 换手　R · 压弹　滚轮/1-4 · 切换<br>左键 · 开枪/劈砍　Tab · 看手机　点击画面捕获鼠标　ESC · 暂停菜单</div>
 <div id="reticle"></div>
 <div id="prompt"></div>
