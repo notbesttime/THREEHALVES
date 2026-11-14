@@ -8,6 +8,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#05070c">
 <title>THREEHALVES — 开场</title>
+<link rel="preload" as="script" href="vendor/three.min.js">
+<link rel="preload" as="script" href="opening.js?v=20261114_1">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html,body { width:100%; height:100%; overflow:hidden; background:#000;
@@ -230,6 +232,7 @@
     margin-bottom:22px; }
   #start p { color:#6b675f; font-size:.85rem; letter-spacing:3px;
     animation:pulse 1.8s ease-in-out infinite; }
+
   #loadmsg { position:fixed; left:0; right:0; bottom:8vh; z-index:70; text-align:center;
     color:#4a4640; font-size:.78rem; letter-spacing:2px; line-height:1.9; padding:0 6vw; }
   #loadmsg.err { color:#ff6a4a; }
@@ -823,7 +826,7 @@ body.ending #oxygen,
         <span class="ach-login-text">登录</span>
       </button>
     </div>
-    <div class="achSub">登录云端同步成就</div>
+    <div class="achSub">登录平台账号后，成就自动云端同步</div>
     <div class="achStats">
       <div class="ach-stat"><b id="achCountUnlocked">0</b><span>已解锁</span></div>
       <div class="ach-stat"><b id="achCountTotal">0</b><span>总数</span></div>
@@ -883,40 +886,34 @@ body.ending #oxygen,
     s.onerror = function(){ fail && fail(new Error(src + ' 加载失败')); };
     document.head.appendChild(s);
   }
-  function loadOptional(src, next){ load(src, next, next); }
   function boot(){
     if(!window.THREE){ return fatal('three.js 已下载但未挂载'); }
     if(!hasError) msg.textContent = '正在构建场景…';
-    load('opening.js?v=20260831_9', function(){ if(!hasError) msg.style.display='none'; },
+    load('opening.js?v=20261114_1', function(){ if(!hasError) msg.style.display='none'; },
          function(){ fatal('opening.js 未找到'); });
   }
-  /* 音频与形象 bundle 必须在 opening.js 前按顺序完成；它们体积较大，
-     并行注入会让 opening.js 偶尔先执行，导致整局没有 BGM / 内置形象。 */
-  loadOptional('portrait_b64.js', function(){
-  loadOptional('chainsaw_b64.js', function(){
-    loadOptional('five_b64.js', function(){
-      loadOptional('one_b64.js', function(){
-        loadOptional('four_b64.js', function(){
-          load('vendor/three.min.js', boot, function(){
-            load('https://unpkg.com/three@0.128.0/build/three.min.js', boot,
-                 function(){ fatal('three.js 无法加载（本地文件缺失且无网络）'); });
-          });
-        });
-      });
-    });
+  /* 音频与形象是独立静态文件，由 opening.js 按楼层按需加载（assets/audio）。
+     这里只保证 three 先于 opening.js 执行；head 里的 preload 让两者并行下载。 */
+  load('vendor/three.min.js', boot, function(){
+    load('https://unpkg.com/three@0.128.0/build/three.min.js', boot,
+         function(){ fatal('three.js 无法加载（本地文件缺失且无网络）'); });
   });
-  });
-  // VibeHub SDK v3：绝对地址是平台硬性要求（作品跑在 vibeapps 域，相对路径 404）。
-  // 加载失败不阻断游戏本身——成就回落到 localStorage，登录 UI 自己处理。
+  // Wovoon 平台云 SDK：平台同源下发 /api/cloud/sdk.js，注入全局 WovoonCloud。
+  // 脱离平台（file:// 双击本地打开）或加载失败时不阻断游戏本身——
+  // 成就回落到 localStorage，登录 UI 自己处理。
   (function(){
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+      if (vibeReadyResolve) vibeReadyResolve(null);
+      return;
+    }
     var sdk = document.createElement('script');
-    sdk.src = 'https://vibe.lumigrav.space/sdk/v3/vibehub.js';
+    sdk.src = '/api/cloud/sdk.js';
     sdk.onload = function(){
-      if (vibeReadyResolve) vibeReadyResolve(window.VibeHub || null);
+      if (vibeReadyResolve) vibeReadyResolve(window.WovoonCloud || null);
     };
     sdk.onerror = function(){
       if (vibeReadyResolve) vibeReadyResolve(null);
-      console.warn('[VibeHub] SDK 脚本加载失败，成就回落本地存储');
+      console.warn('[Wovoon] 云 SDK 加载失败，成就回落本地存储');
     };
     document.head.appendChild(sdk);
   })();
