@@ -2744,8 +2744,9 @@ const lvl1Colliders = [
   elev4Shaft.add(ropeTowel);
 }
 /* ==================== [7] 音效 ====================
-   真实音频优先；解码失败时回退到原合成音。Electron/file:// 也兼容
-   （base64 内嵌避开 CORS 与离线场景）。 */
+   音频是独立静态文件（assets/audio），按楼层按需 fetch + decodeAudioData，
+   首屏不再背着整包 BGM；解码失败或 file:// 打开时，BGM 与电锯循环降级为
+   <audio> 元素播放，合成音始终保留。 */
 let AC = null, master = null, fireGain = null;
 let sfxBus = null, musicBus = null;   // 音效总线 / 音乐总线（ESC 菜单各自调音量）
 let fiveBuf = null;                   // AudioBuffer: five40.mp3 解码结果（5F 背景音乐）
@@ -2756,18 +2757,110 @@ const MUSIC_BASE = 0.21;              // 音乐基础音量 ≈ 电锯典型响�
 let sawLoopBuf = null;             // AudioBuffer: chainsaw_loop.mp3 解码结果
 let sawRevBuf  = null;             // AudioBuffer: chainsaw_rev.mp3  解码结果
 let sawLoopSrc = null;             // BufferSource: 正在循环的实例
+let sawLoopEl  = null;             // <audio> 降级：取音失败 / file:// 时的循环
+let sawLoading = { loop: false, rev: false };
 let sawLoopGain = null;            // 循环段的 Gain（按距离驱动音量/滤波器）
 let sawLoopLP   = null;            // 低通滤波（距离远的闷）
 let sawLoopBP   = null;            // 带通（中高频，模拟隔墙）
+let musicVol = 1, sfxVol = 1;      // 0..1，<audio> 降级路径直接拿来调音量
 
-/* 把 base64 字符串变成 ArrayBuffer（给 decodeAudioData 用） */
-function _b64ToBytes(b64) {
-  const bin = atob(b64);
-  const len = bin.length;
-  const buf = new ArrayBuffer(len);
-  const view = new Uint8Array(buf);
-  for (let i = 0; i < len; i++) view[i] = bin.charCodeAt(i);
-  return buf;
+const IS_FILE = location.protocol === 'file:';
+const AUDIO_DIR = 'assets/audio/';
+const BGM_FILES = { five: 'five40.mp3', four: 'four.mp3', one: 'one.mp3' };
+const BGM_LOADING = { five: false, four: false, one: false };
+const bgmEls = {};                 // file:// 降级：每层一条 <audio loop>
+
+function audioUrl(name) {
+  try { return new URL(AUDIO_DIR + name, document.baseURI).href; }
+  catch (e) { return AUDIO_DIR + name; }
+}
+const audioPrefetch = {};   // url -> Promise<ArrayBuffer>，预取与正式加载共用同一次下载
+function fetchAudio(url) {
+  if (!audioPrefetch[url]) {
+    audioPrefetch[url] = fetch(url).then(function (r) {
+      if (!r.ok) throw new Error(url + ' ' + r.status);
+      return r.arrayBuffer();
+    });
+    audioPrefetch[url].catch(function () { delete audioPrefetch[url]; });
+  }
+  return audioPrefetch[url];
+}
+function loadAudioBuffer(url) {
+  return fetchAudio(url).then(function (ab) {
+    return new Promise(function (resolve, reject) {
+      if (!AC) return reject(new Error('no AudioContext'));
+      /* decodeAudioData 会 detach ArrayBuffer；解码完就释放缓存，失败则允许重取 */
+      AC.decodeAudioData(ab,
+        function (buf) { delete audioPrefetch[url]; resolve(buf); },
+        function (e) { delete audioPrefetch[url]; reject(e); });
+    });
+  });
+}
+function bgmKeyForLevel(level) {
+  if (level === 0) return 'five';
+  if (level === -1 || level === 1) return 'four';
+  if (level === -2) return 'one';
+  return '';
+}
+function ensureBgmKey(key) {
+  if (!key) return;
+  if (IS_FILE) { fileBgmEl(key); return; }   // 元素自带流式播放，不需要预取
+  if (!AC || BGM_LOADING[key]) return;
+  if ((key === 'five' && fiveBuf) || (key === 'four' && fourBuf) || (key === 'one' && oneBuf)) return;
+  BGM_LOADING[key] = true;
+  loadAudioBuffer(audioUrl(BGM_FILES[key])).then(function (buf) {
+    if (key === 'five') fiveBuf = buf;
+    else if (key === 'four') fourBuf = buf;
+    else oneBuf = buf;
+    updateBGM();
+  }).catch(function () {
+    BGM_LOADING[key] = false;   // 失败允许下次进层重试
+  });
+}
+/* 进层只取当前楼层曲目；下一层的曲目 8 秒后再取，避免和首帧抢带宽 */
+function ensureBgm(level) {
+  const key = bgmKeyForLevel(level);
+  if (!key) return;
+  ensureBgmKey(key);
+  const next = key === 'five' ? 'four' : (key === 'four' ? 'one' : '');
+  if (next) setTimeout(function () { ensureBgmKey(next); }, 8000);
+}
+/* 开场画面阶段先取小体积样本与五楼 BGM，点击「开始」时解码几乎零等待 */
+function prefetchAudioHints() {
+  if (IS_FILE) return;
+  ['chainsaw_loop.mp3', 'chainsaw_rev.mp3', BGM_FILES.five].forEach(function (name) {
+    fetchAudio(audioUrl(name)).catch(function () {});
+  });
+}
+function fileBgmEl(key) {
+  if (bgmEls[key]) return bgmEls[key];
+  const el = document.createElement('audio');
+  el.src = audioUrl(BGM_FILES[key]);
+  el.loop = true;
+  el.preload = 'none';
+  el.volume = 0;
+  bgmEls[key] = el;
+  return el;
+}
+function updateFileBGM() {
+  const want = {
+    five: curLevel === 0 && state === 'play',
+    four: curLevel === -1 || curLevel === 1,
+    one: curLevel === -2
+  };
+  Object.keys(want).forEach(function (key) {
+    if (want[key]) {
+      const el = fileBgmEl(key);
+      const vol = MUSIC_BASE * musicVol;
+      if (el.volume !== vol) el.volume = vol;
+      if (el.paused) {
+        const p = el.play();
+        if (p && p.catch) p.catch(function () {});
+      }
+    } else if (bgmEls[key] && !bgmEls[key].paused) {
+      bgmEls[key].pause();
+    }
+  });
 }
 
 /* BGM 调度：
@@ -2787,6 +2880,7 @@ function tickBGM(src, want, buf) {
   return src;
 }
 function updateBGM() {
+  if (IS_FILE) { updateFileBGM(); return; }
   if (!AC || !musicBus) return;
   const wantFive = !!fiveBuf && curLevel === 0 && state === 'play';
   const wantFour = !!fourBuf && (curLevel === -1 || curLevel === 1);
@@ -2806,7 +2900,7 @@ const SFX = {
     musicBus = AC.createGain(); musicBus.connect(AC.destination);
     this.applyVolumes();
     this.fireLoop(); this.drone();
-    this.loadChainsaw(); this.loadBGM();
+    this.loadChainsaw(); ensureBgm(curLevel);
   },
   /* 应用 ESC 菜单里存的音量（0..100），并把滑条位置同步回去 */
   applyVolumes: function () {
@@ -2817,36 +2911,32 @@ const SFX = {
       m = parseInt(localStorage.getItem('musVol') || '100', 10) || 100;
     } catch (e) {}
     s = Math.max(0, Math.min(100, s)); m = Math.max(0, Math.min(100, m));
-    sfxBus.gain.value = s / 100;
-    musicBus.gain.value = MUSIC_BASE * (m / 100);
+    sfxVol = s / 100; musicVol = m / 100;
+    sfxBus.gain.value = sfxVol;
+    musicBus.gain.value = MUSIC_BASE * musicVol;
+    if (IS_FILE) updateFileBGM();   // 降级播放的元素音量要同步滑条
     const s1 = document.getElementById('sfxVol'), m1 = document.getElementById('musVol');
     if (s1) s1.value = s; if (m1) m1.value = m;
   },
-  loadBGM: function () {
-    if (!AC) return;
-    try {
-      if (window.FIVE_B64) AC.decodeAudioData(_b64ToBytes(window.FIVE_B64), function (buf) { fiveBuf = buf; }, function () {});
-      if (window.ONE_B64) AC.decodeAudioData(_b64ToBytes(window.ONE_B64), function (buf) { oneBuf = buf; }, function () {});
-      if (window.FOUR_B64) AC.decodeAudioData(_b64ToBytes(window.FOUR_B64), function (buf) { fourBuf = buf; }, function () {});
-    } catch (e) { /* 解码失败就没有 BGM，不影响游戏 */ }
-  },
   loadChainsaw: function () {
-    // 必须走 window.，裸标识符在文件缺失时会抛 ReferenceError 而不是给 undefined
-    const b64 = window.SFX_B64;
-    if (!AC || !b64 || !b64.loop) return;
-    try {
-      AC.decodeAudioData(_b64ToBytes(b64.loop),
-        function (buf) { sawLoopBuf = buf; }, function () {});
-      if (b64.rev) {
-        AC.decodeAudioData(_b64ToBytes(b64.rev),
-          function (buf) { sawRevBuf = buf; }, function () {});
-      }
-    } catch (e) { /* 解码失败就用合成音兜底 */ }
+    if (!AC || IS_FILE) return;   // file:// 用 <audio> 循环，不占解码内存
+    if (!sawLoopBuf && !sawLoading.loop) {
+      sawLoading.loop = true;
+      loadAudioBuffer(audioUrl('chainsaw_loop.mp3'))
+        .then(function (buf) { sawLoopBuf = buf; })
+        .catch(function () { sawLoading.loop = false; });
+    }
+    if (!sawRevBuf && !sawLoading.rev) {
+      sawLoading.rev = true;
+      loadAudioBuffer(audioUrl('chainsaw_rev.mp3'))
+        .then(function (buf) { sawRevBuf = buf; })
+        .catch(function () { sawLoading.rev = false; });
+    }
   },
   /* 按距离刷新电锯循环音：远处闷、近处亮
      仅当 sawLoopSrc 已经在跑（startChainsaw 之后）时调用 */
   updateChainsawDist: function (dist, wall01) {
-    if (!AC || !sawLoopGain || !sawLoopSrc) return;
+    if (!AC) return;
     const d = Math.max(0.5, dist);
     // 1/d 衰减 + 远端最低 0.05；墙越厚越闷、越响度衰减
     /* 加响：原来上限 0.5 太克制，破门后那一下的压迫感出不来。
@@ -2855,6 +2945,11 @@ const SFX = {
     let vol = Math.min(0.95, 1.6 / d) * (1 - 0.5 * wall01) + 0.05 * (1 - wall01);
     if (typeof robotOut !== 'undefined' && robotOut) vol = Math.min(1.0, vol * 1.35);
     if (typeof lvl4Barred !== 'undefined' && lvl4Barred && curLevel === -1) vol = Math.min(1.0, vol * 1.5);
+    if (sawLoopEl && !sawLoopEl.paused) {
+      sawLoopEl.volume = Math.max(0, Math.min(1, vol * sfxVol));
+      return;
+    }
+    if (!sawLoopGain || !sawLoopSrc) return;
     const t = AC.currentTime;
     sawLoopGain.gain.cancelScheduledValues(t);
     sawLoopGain.gain.linearRampToValueAtTime(vol, t + 0.18);
@@ -2872,7 +2967,8 @@ const SFX = {
   startChainsaw: function () {           // 起动：轰一脚油门 + 起循环
     if (!AC) return;
     this.revChainsaw(0.85);
-    if (!sawLoopBuf || sawLoopSrc) return;   // 素材没解码好 / 已经在循环
+    if (!sawLoopBuf) { this.startChainsawEl(); return; }   // 还没解码好：用 <audio> 先顶上
+    if (sawLoopSrc) return;                // 已经在循环
     sawLoopLP  = AC.createBiquadFilter(); sawLoopLP.type  = 'lowpass';  sawLoopLP.frequency.value = 3800;
     sawLoopBP  = AC.createBiquadFilter(); sawLoopBP.type  = 'bandpass'; sawLoopBP.Q.value = 1.4;
     sawLoopGain = AC.createGain(); sawLoopGain.gain.value = 0.0;
@@ -2883,6 +2979,16 @@ const SFX = {
     sawLoopSrc.connect(sawLoopLP); sawLoopLP.connect(sawLoopBP);
     sawLoopBP.connect(sawLoopGain); sawLoopGain.connect(master);
     sawLoopSrc.start(0, 0.03);
+  },
+  startChainsawEl: function () {
+    if (!sawLoopEl) {
+      sawLoopEl = new Audio(audioUrl('chainsaw_loop.mp3'));
+      sawLoopEl.loop = true;
+      sawLoopEl.preload = 'auto';
+      sawLoopEl.volume = 0;
+    }
+    const p = sawLoopEl.play();
+    if (p && p.catch) p.catch(function () {});   // 无手势/取音失败时静音，不影响玩法
   },
   /* 轰油门：有素材就播真实录音，没有就退回合成音，保证任何情况下都有声 */
   revChainsaw: function (strength) {
@@ -2913,6 +3019,7 @@ const SFX = {
     o.connect(bp); bp.connect(g); g.connect(master); o.start(); o.stop(t + d + 0.1);
   },
   stopChainsaw: function () {
+    if (sawLoopEl && !sawLoopEl.paused) { try { sawLoopEl.pause(); } catch (e) {} }
     if (!AC || !sawLoopSrc) return;
     const t = AC.currentTime;
     sawLoopGain.gain.cancelScheduledValues(t);
@@ -3356,8 +3463,8 @@ const portraitBackBtn = document.getElementById('portraitBackBtn');
 const rotatePrompt = document.getElementById('rotatePrompt');
 const rotateMenuBtn = document.getElementById('rotateMenuBtn');
 const portraitPresets = [
-  { id: 'penguin', name: '企鹅形象', src: 'robot_portrait_penguin.png', b64: 'penguin', filter: '' },
-  { id: 'none', name: '原始建模', src: '', b64: '', filter: '' }
+  { id: 'penguin', name: '企鹅形象', src: 'robot_portrait_penguin.png', filter: '' },
+  { id: 'none', name: '原始建模', src: '', filter: '' }
 ];
 function portraitAssetUrl(path) {
   try { return new URL(path, document.baseURI).href; }
@@ -3956,35 +4063,20 @@ function portraitLoadPreset(preset) {
   if (preset.id === 'none') { portraitClearToOriginal(preset.name); return; }
   portraitSetStatus('正在加载形象…', false);
   const serial = ++portraitTextureSerial;
-  /* 首选内嵌 base64：不依赖网络与协议，file:// 直接打开也能加载 */
-  const b64 = window.PORTRAIT_B64 && window.PORTRAIT_B64[preset.b64];
-  if (b64) {
-    const img = new Image();
-    img.onload = function () {
-      if (serial !== portraitTextureSerial) return;
-      portraitApplyTexture(portraitCanvasTexture(img, ''), preset.name, img, '');
-    };
-    img.onerror = function () {
-      if (serial === portraitTextureSerial) portraitSetStatus('内置形象解码失败', true);
-    };
-    img.src = 'data:image/png;base64,' + b64;
-    return;
-  }
-  /* 兜底：内嵌包缺失时走文件路径（托管 HTTP 下可用） */
+  /* 用 <img> 而不是 TextureLoader：file:// 下 XHR/fetch 受限，图片元素仍可加载 */
   const assetUrl = portraitAssetUrl(preset.src);
-  const loader = new THREE.TextureLoader();
-  loader.load(assetUrl, function (loaded) {
-    if (serial !== portraitTextureSerial) { loaded.dispose(); return; }
-    const image = loaded.image;
-    const tx = portraitCanvasTexture(image, '');
-    loaded.dispose();
-    portraitApplyTexture(tx, preset.name, image, '');
-  }, undefined, function () {
+  const img = new Image();
+  img.onload = function () {
+    if (serial !== portraitTextureSerial) return;
+    portraitApplyTexture(portraitCanvasTexture(img, ''), preset.name, img, '');
+  };
+  img.onerror = function () {
     if (serial === portraitTextureSerial) {
       portraitSetStatus('内置形象加载失败：' + assetUrl, true);
       if (portraitPreview) portraitPreview.src = assetUrl;
     }
-  });
+  };
+  img.src = assetUrl;
 }
 function portraitBuildGrid() {
   if (!portraitGrid) return;
@@ -4104,42 +4196,38 @@ const ACHIEVEMENTS = [
 const ACH_KEY = 'threehalves_ach';   // localStorage 键
 
 /* ============================================================
-   VibeHub 云存档桥接
+   Wovoon 平台云存档（成就）
    ------------------------------------------------------------
-   平台规范（sdk/v3）：存档走 vibe.save（玩家自己的数据，本人读写），
-   全局排行榜才用 vibe.global，单局元数据用 room.data。成就是玩家级
-   永久进度，所以落 vibe.save；同时保留 localStorage 作为离线兜底，
-   这样 SDK 加载失败或断网时成就不丢。
+   平台契约（协议 1）：登录玩家的数据写进 .wovoon 声明的集合，通过平台
+   同源下发的全局 WovoonCloud 访问；未登录游客只读本地副本。
+   直接用 file:// 双击打开、或任何没有平台云 SDK 的环境下 WovoonCloud
+   不存在，此时完全回落到 localStorage，成就解锁与玩法都不受影响。
 
-   数据形状带版本号，SDK 明确不会自动迁移：
+   数据形状带版本号，平台不会自动迁移：
      { v: 2, unlocked: { end1: true, ... } }
    v 升到 2 是因为旧存档是裸的 { id: true } 映射，需要一次字段升级。
+   集合名 achievements 必须与 .wovoon 的 collection:achievements 声明、
+   以及 collections.json 里的权限声明保持一致。
    ============================================================ */
-const VIBEHUB_WORK = (function () {
-  /* Hosted games use /<project-slug>/ as their first path segment. Reading it
-     at runtime keeps SDK auth bound to the exact hosted project instead of
-     guessing from the title. Local previews deliberately disable cloud auth. */
-  const parts = String(location.pathname || '').split('/').filter(Boolean);
-  const candidate = parts[0] || '';
-  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(candidate)
-    && candidate !== 'opening.html' && candidate !== 'index.html'
-    ? candidate : '';   // Local preview has no trustworthy project slug
-})();
-const ACH_CLOUD_KEY = 'achievements';  // vibe.save 里的键名
+const ACH_COLLECTION = 'achievements';
 const ACH_SCHEMA_V = 2;
 /* 成就解锁状态必须有顶层声明：achUnlock 在任何路线都可能被调用
    （含跳过 begin() 的调试路线），不能依赖 achLocalLoad 隐式创建全局 */
 let achUnlocked = {};
 
-let vibeInst = null;                  // VibeHub.init() 的返回，可能为 null
-let vibeUser = null;                  // vibe.login() 返回的 {id, name, image}
+let vibeInst = null;                  // 平台集合句柄；无平台云 SDK 时为 null
+let vibeUser = null;                  // 平台身份 {playerId, displayName, loggedIn}
 let vibeLoading = false;
 let vibeAttachPromise = null;
 let achCloudDirty = false;            // 本地有改动、还没推到云端
 let achCloudState = 'local';          // local | syncing | synced | error
+let achDocId = '';                    // 本玩家成就文档 id（add 之后记住）
 
+function cloudSdk() {
+  return (typeof window !== 'undefined' && window.WovoonCloud) ? window.WovoonCloud : null;
+}
 function vibeAvailable() {
-  return !!(vibeInst && typeof vibeInst.save === 'object' && vibeInst.save);
+  return !!(vibeInst && typeof vibeInst.add === 'function');
 }
 function achValidSet(obj) {
   const valid = {};
@@ -4149,13 +4237,20 @@ function achValidSet(obj) {
 /* 从云端拉一份成就，和本地合并（云端优先，本地是离线缓存）。
    登录状态变化、打开成就面板时各调一次。 */
 async function achSyncFromCloud() {
-  if (!vibeAvailable() || !vibeUser) return false;
-  achCloudState = 'syncing';
-  if (achOpen) renderAchievements();
+  /* 云同步是"尽力而为"：任何异常都在函数内部消化，绝不向调用方抛错、
+     更不能拖住开场或点击流程（本地/未托管环境下 fetch 失败是常态）。 */
   try {
-    const rec = await vibeInst.save.get(ACH_CLOUD_KEY);
-    if (rec) {
-      const incoming = achValidSet(rec.unlocked || rec);
+    if (!vibeAvailable() || !vibeUser || !vibeUser.loggedIn) return false;
+    achCloudState = 'syncing';
+    if (achOpen) renderAchievements();
+    /* PLAYER 读权限下 query 只会返回当前玩家自己的文档。 */
+    const docs = await vibeInst.query({ ownerOnly: true, limit: 1 });
+    const first = docs && docs[0];
+    if (first) {
+      achDocId = first.id;
+      let rec = null;
+      try { rec = JSON.parse(first.data); } catch (e) { rec = null; }
+      const incoming = achValidSet(rec && (rec.unlocked || rec));
       if (Object.keys(incoming).length) achUnlocked = achValidSet(Object.assign({}, achUnlocked, incoming));
       achSave();
     }
@@ -4166,18 +4261,23 @@ async function achSyncFromCloud() {
   } catch (e) {
     achCloudState = 'error';
     if (achOpen) renderAchievements();
-    console.warn('[VibeHub] 拉取成就失败', e); return false;
+    console.warn('[Wovoon] 拉取成就失败', e); return false;
   }
 }
 /* 把当前成就推到云端。解锁时调用；登录/登出时也会各推一次。
    失败静默保留本地副本，下次解锁或登录再试。 */
 async function achPushCloud() {
-  if (!vibeAvailable() || !vibeUser) return false;
-  achCloudState = 'syncing';
-  if (achOpen) renderAchievements();
-  const payload = { v: ACH_SCHEMA_V, unlocked: achUnlocked };
   try {
-    await vibeInst.save.set(ACH_CLOUD_KEY, payload);
+    if (!vibeAvailable() || !vibeUser || !vibeUser.loggedIn) return false;
+    achCloudState = 'syncing';
+    if (achOpen) renderAchievements();
+    const payload = { key: ACH_COLLECTION, v: ACH_SCHEMA_V, unlocked: achUnlocked };
+    if (achDocId) {
+      await vibeInst.set(achDocId, payload);
+    } else {
+      const doc = await vibeInst.add(payload);
+      achDocId = (doc && doc.id) || '';
+    }
     achCloudDirty = false;
     achCloudState = 'synced';
     if (achOpen) renderAchievements();
@@ -4186,7 +4286,7 @@ async function achPushCloud() {
     achCloudDirty = true;
     achCloudState = 'error';
     if (achOpen) renderAchievements();
-    console.warn('[VibeHub] 推送成就失败', e); return false;
+    console.warn('[Wovoon] 推送成就失败', e); return false;
   }
 }
 function achLocalLoad() {
@@ -4309,33 +4409,41 @@ achView.addEventListener('wheel', function (e) {
   e.preventDefault();
   e.stopPropagation();
 }, { passive: false });
-/* 登录：走 VibeHub SDK 的内存态授权。SDK 不弹自带登录窗，游戏自己给按钮
-   和账号状态；授权成功后主站登录会话还在，通常几乎瞬间完成。
-   SDK 不可用（离线、加载失败）时按钮给出明确提示，不影响本地成就。 */
+
+// 登录：平台上玩家身份由平台会话下发，游戏只读取并展示，不弹第三方登录窗。
+// 没有平台云 SDK（file:// 本地打开、断网）时按钮给出明确的本地模式提示，
+// 成就照常解在 localStorage 里，不影响玩法。
 function vibeStatusText() {
-  if (!VIBEHUB_WORK) return '本地预览';
+  if (!cloudSdk()) return '本地';
   if (vibeLoading) return '授权中…';
-  if (vibeUser) return '已登录 · ' + (vibeUser.name || vibeUser.id || '玩家');
-  if (!window.VibeHub) return '平台离线';
+  if (vibeUser && vibeUser.loggedIn) return '已登录 · ' + (vibeUser.displayName || vibeUser.playerId || '玩家');
+  if (vibeUser && vibeUser.playerId) return '游客';
   return '登录';
 }
 function refreshAchLoginUI() {
   const txt = vibeStatusText();
-  achLoginBtn.disabled = !VIBEHUB_WORK || vibeLoading;
-  achLoginBtn.classList.toggle('on', !!vibeUser);
+  achLoginBtn.disabled = !cloudSdk() || vibeLoading;
+  achLoginBtn.classList.toggle('on', !!(vibeUser && vibeUser.loggedIn));
   achLoginBtn.classList.toggle('busy', vibeLoading);
   achLoginBtn.querySelector('.ach-login-text').textContent = txt;
   if (achOpen) renderAchievements();
 }
+/* 读取平台会话并拿到成就集合句柄。平台 SDK 由页面同源加载，会话在运行时
+   已带登录态；这里不做任何凭据交换，也不向第三方发送身份信息。 */
 async function vibeEnsureInit() {
-  if (!VIBEHUB_WORK) return null;
   if (vibeInst) return vibeInst;
   if (vibeAttachPromise) return vibeAttachPromise;
   vibeAttachPromise = (async function () {
-    const api = window.__vibeHubReady ? await window.__vibeHubReady : window.VibeHub;
-    if (!api || typeof api.init !== 'function') return null;
-    try { vibeInst = await api.init({ work: VIBEHUB_WORK }); }
-    catch (e) { console.warn('[VibeHub] init 失败', e); vibeInst = null; }
+    const sdk = cloudSdk();
+    if (!sdk) return null;
+    try {
+      const session = await sdk.ready();
+      vibeUser = session ? { playerId: session.playerId, displayName: session.displayName, loggedIn: !!session.loggedIn } : null;
+      vibeInst = sdk.collection(ACH_COLLECTION);
+    } catch (e) {
+      console.warn('[Wovoon] 云能力初始化失败', e);
+      vibeInst = null;
+    }
     return vibeInst;
   })();
   try { return await vibeAttachPromise; }
@@ -4343,59 +4451,43 @@ async function vibeEnsureInit() {
 }
 async function vibeDoLogin() {
   if (vibeLoading) return;
-  if (vibeUser) { vibeLogout(); return; }
   vibeLoading = true; refreshAchLoginUI();
   try {
     const inst = await vibeEnsureInit();
     if (!inst) { vibeUser = null; }
-    else vibeUser = await inst.login();
-  } catch (e) { console.warn('[VibeHub] 登录失败', e); vibeUser = null; }
+    else {
+      const sdk = cloudSdk();
+      const session = sdk ? await sdk.ready() : null;
+      vibeUser = session ? { playerId: session.playerId, displayName: session.displayName, loggedIn: !!session.loggedIn } : null;
+    }
+  } catch (e) { console.warn('[Wovoon] 读取平台身份失败', e); vibeUser = null; }
   vibeLoading = false;
   refreshAchLoginUI();
-  if (vibeUser) {
+  if (vibeUser && vibeUser.loggedIn) {
     await achSyncFromCloud();
     await achPushCloud();
   } else if (achOpen) renderAchievements();
 }
 function vibeLogout() {
-  if (!vibeInst) { vibeUser = null; refreshAchLoginUI(); return; }
-  try { vibeInst.logout(); } catch (e) {}
+  /* 平台会话由平台管理，游戏侧只清本地缓存的展示态。 */
   vibeUser = null;
   refreshAchLoginUI();
   if (achOpen) renderAchievements();
 }
 achLoginBtn.addEventListener('click', function () { vibeDoLogin(); });
-/* SDK 在 opening.js 之后才到时也能接上；失败自然保持本地成就。 */
-if (window.__vibeHubReady) {
-  window.__vibeHubReady.then(function () { refreshAchLoginUI(); });
+/* 云 SDK 可能晚于 opening.js 到达；等待就绪后再接登录态与成就合并。 */
+function bootstrapCloud() {
+  if (!cloudSdk()) { refreshAchLoginUI(); return; }
   vibeEnsureInit().then(function (inst) {
-    if (!inst || typeof inst.onAuthChange !== 'function') { refreshAchLoginUI(); return; }
-    inst.onAuthChange(function (user) {
-      vibeUser = user || null;
-      achCloudState = vibeUser ? 'syncing' : 'local';
-      refreshAchLoginUI();
-      if (user) achSyncFromCloud().then(function () { return achPushCloud(); });
-    });
-    /* init() may have restored a hash token before the listener was attached. */
-    if (inst.isLoggedIn && inst.isLoggedIn()) {
-      vibeUser = inst.user || null;
-      achCloudState = vibeUser ? 'syncing' : 'local';
-      refreshAchLoginUI();
-      if (vibeUser) {
-        achSyncFromCloud().then(function () { return achPushCloud(); });
-      }
+    refreshAchLoginUI();
+    if (inst && vibeUser && vibeUser.loggedIn) {
+      achCloudState = 'syncing';
+      achSyncFromCloud().then(function () { return achPushCloud(); });
     }
   });
-} else if (window.VibeHub && typeof window.VibeHub.init === 'function') {
-  vibeEnsureInit().then(function (inst) {
-    if (!inst || typeof inst.onAuthChange !== 'function') { refreshAchLoginUI(); return; }
-    inst.onAuthChange(function (user) {
-      vibeUser = user || null;
-      refreshAchLoginUI();
-      if (user) achSyncFromCloud();
-    });
-  });
 }
+if (window.__vibeHubReady) window.__vibeHubReady.then(bootstrapCloud);
+else bootstrapCloud();
 /* ESC 菜单中的设备选择：手动覆盖自动推断，存 localStorage 持续生效 */
 (function () {
   function bindDeviceChoice(mode) {
@@ -7014,6 +7106,7 @@ let playerFloorY = 0;           // 平滑后的脚下高度
 function switchLevel(n) {
   if (curLevel === n) return;
   curLevel = n;
+  ensureBgm(n);   // 进层才取该层 BGM，下一层交给空闲预取
   /* 按楼层剔除：不在这一层的几何和它内部的光源整组关掉。
      Three.js 会跳过 visible=false 的子树，光源也不再参与着色器计算 —— 
      场上有 35 个点光源，这是最有效的一笔优化。 */
@@ -7837,10 +7930,27 @@ function enterPlayerRoom() {
      那一帧会明显卡一下。这里在进房间时统一编译一遍（把要用的组临时点亮）。 */
   if (!shadersWarmed) {
     shadersWarmed = true;
-    const vis = [];
-    [robot, lvl4Grp, roofGrp, lvl1Grp].forEach(function (g) { if (g) { vis.push([g, g.visible]); g.visible = true; } });
-    try { renderer.compile(scene, cam); } catch (e) { /* 编译失败也不该拦住游戏 */ }
-    vis.forEach(function (p) { p[0].visible = p[1]; });
+    /* 着色器预热改成"分帧预热"：
+       一次性 renderer.compile(scene, cam) 是同步调用，会编译全场景所有材质，
+       在集显 / 软件渲染 / 未开硬件加速的机器上要阻塞主线程数秒到数十秒。
+       而它正好发生在点「点击继续」之后（closing 结束那一帧），画面被眼皮盖住，
+       玩家看到的就是"点完立刻定格、声音还在响"。
+       这里按组拆开、每次只编译一组、组与组之间让出一帧，主线程不再被长时间占住。
+       预热是纯优化：任何一组编译失败都只跳过它，不影响玩法。 */
+    const warmGroups = [playerRoom, worldSet, robot, lvl4Grp, roofGrp, lvl1Grp]
+      .filter(function (g) { return !!g; });
+    let warmIdx = 0;
+    function warmNext() {
+      if (warmIdx >= warmGroups.length) return;
+      const g = warmGroups[warmIdx++];
+      const wasVis = g.visible;
+      g.visible = true;
+      try { renderer.compile(g, cam); } catch (e) { /* 单个组失败不拦游戏 */ }
+      g.visible = wasVis;
+      setTimeout(warmNext, 0);   /* 让出主线程，下一组放到下一个任务里 */
+    }
+    /* 延后 800ms 再开始：先让闭眼过渡跑完，玩家不会在过渡里撞上编译 */
+    setTimeout(warmNext, 800);
   }
   /* 剧情链重置：目标/手机/机器人 */
   leftRoomOnce = false; phoneMsg505 = false; phoneNewsRead = false; phoneHasSignal = true;
@@ -9188,7 +9298,11 @@ function begin() {
   if (running) return;
   try { SFX.init(); } catch (e) { /* 无音频也要能跑 */ }
   achLocalLoad();
-  if (vibeUser) achSyncFromCloud();   // 已登录就从云端合并（不阻塞开场）
+  /* 云同步必须推迟到开场之后：不能在"点击开始"这一步同步发请求，
+     SDK 抖动/本地未托管会让 fetch 失败，进而拖垮开场。 */
+  setTimeout(function () {
+    try { if (vibeUser) achSyncFromCloud(); } catch (e) {}
+  }, 2500);
   /* 形象纹理在玩家点击开始时才加载，避免首页无谓请求；面板打开前也会按需加载。 */
   document.getElementById('start').classList.add('gone');
   running = true;
@@ -9198,6 +9312,7 @@ function begin() {
   showIntroFf();
 }
 document.getElementById('start').addEventListener('click', begin);
+
 addEventListener('keydown', function (e) {
   if (state === 'idle' && (e.code === 'Space' || e.code === 'Enter' || e.code === 'NumpadEnter')) begin();
 });
@@ -9386,6 +9501,27 @@ if (DBG) {
     get portrait() { return robotPortraitSprite; },
     get portraitReady() { return robotPortraitReady; },
     get state() { return state; },
+    get audio() {
+      return {
+        ac: AC && AC.state,
+        level: curLevel,
+        bufs: { five: !!fiveBuf, four: !!fourBuf, one: !!oneBuf, sawLoop: !!sawLoopBuf, sawRev: !!sawRevBuf },
+        playing: { five: !!bgmFiveSrc, four: !!bgmFourSrc, one: !!bgmOneSrc },
+        elements: Object.keys(bgmEls)
+      };
+    },
+    setState: function (v) { state = v; updateBGM(); },
+    setLevel: function (n) { switchLevel(n); updateBGM(); },
+    tickAudio: function () { updateBGM(); },
+    saw: function (on) { if (on) SFX.startChainsaw(); else SFX.stopChainsaw(); },
+    get sawEl() {
+      return sawLoopEl ? { paused: sawLoopEl.paused, vol: sawLoopEl.volume, file: sawLoopEl.src.split('/').pop() } : null;
+    },
+    get fileBgm() {
+      return Object.keys(bgmEls).map(function (k) {
+        return { key: k, paused: bgmEls[k].paused, t: +bgmEls[k].currentTime.toFixed(2) };
+      });
+    },
     /* 攀爬段验证桥接：闭包变量外部直读不到，全部经这里中转 */
     get climbMode() { return acClimbMode; },
     set climbMode(v) { acClimbMode = v; },
@@ -9402,5 +9538,7 @@ if (DBG) {
     climbJump: function () { acClimbJump(); }
   };
 }
+/* 标题画面期间先把小样本与五楼 BGM 取进 HTTP 缓存，点击「开始」后只解码不下载 */
+setTimeout(prefetchAudioHints, 600);
 animate();
 }

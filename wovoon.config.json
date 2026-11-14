@@ -1,0 +1,9 @@
+{
+  "api": "https://www.wovoon.com",
+  "name": "THREEHALVES[火灾]",
+  "tagline": "第一人称火灾逃生解谜：烟雾、缺氧与走廊里的机器人",
+  "description": "在一栋被森林火灾包围的住宅楼里，克服烟雾、缺氧和火焰，利用湿毛巾捂住口鼻，寻找逃生路线；还有一台可能失控的机器人在走廊里游荡。含 6 个结局与隐藏成就、机器人追击与电锯 QTE、手机短信剧情推送。WASD 移动，Shift 奔跑，E 交互，F 拾取。支持桌面与移动端触控。",
+  "category": "冒险解谜",
+  "supportedDevices": "desktop,mobile",
+  "inputMethods": "KEYBOARD,MOUSE,TOUCH"
+}
